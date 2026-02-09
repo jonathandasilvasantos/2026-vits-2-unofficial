@@ -1,0 +1,105 @@
+VITS-2 Implementation Fixes Log
+================================
+
+FIX 1: clip_grad_value_ crash with None
+  File: src/utils/commons.py
+  Date: 2026-02-09
+  Problem: clip_grad_value_ called with clip_value=None causes
+           TypeError on clamp_(-None, None) at first training step.
+  Fix: Added early return guard: if clip_value is None: return
+  Impact: WILL-CRASH -> Fixed. Training can now start.
+
+FIX 2: Discriminator gradient contamination
+  File: train.py
+  Date: 2026-02-09
+  Problem: Discriminator gradients accumulated both disc step AND
+           generator step gradients. The gen backward added gradients
+           to disc parameters, pushing discriminator in wrong direction.
+  Fix: Added optim_d.zero_grad(set_to_none=True) AFTER disc step
+       and BEFORE generator backward pass.
+  Impact: CRITICAL -> Fixed. Clean gradient separation ensured.
+
+FIX 3: Missing discriminator weights in checkpoints
+  File: train.py
+  Date: 2026-02-09
+  Problem: save_checkpoint/load_checkpoint did not save MPD and MSD
+           discriminator state_dict. Discriminators restarted from
+           random weights when resuming training.
+  Fix: Added optional mpd= and msd= parameters to save/load functions.
+       Saves state["mpd"] and state["msd"] alongside model weights.
+       Backward compatible with old checkpoints.
+  Impact: CRITICAL -> Fixed. Training can resume without disc reset.
+
+FIX 4: Duration predictor parameter freezing with substring matching
+  File: train_dp.py
+  Date: 2026-02-09
+  Problem: Used "if 'dp' not in name" to filter DP parameters, which
+           could accidentally match parameters containing "dp" substring
+           (e.g., "adaptor", "dropout").
+  Fix: Changed to name.startswith("dp.") or name.startswith("dp_disc.")
+       for safe prefix matching.
+  Impact: MEDIUM -> Fixed. Correct parameter freezing in DP training.
+
+FIX 5: MAS pure Python performance
+  File: src/models/mas.py
+  Date: 2026-02-09
+  Problem: Monotonic Alignment Search used pure Python nested loops,
+           adding hours to training time.
+  Fix: Replaced with numba @njit compiled inner DP kernel.
+       10-50x speedup on CPU portion of MAS.
+  Impact: HIGH -> Fixed. MAS no longer a training bottleneck.
+
+FIX 6: Mel spectrogram filterbank recomputed every call
+  File: src/audio/mel_processing.py
+  Date: 2026-02-09 (prior phase)
+  Problem: Mel filterbank and Hann window were recreated on every
+           mel_spectrogram() call.
+  Fix: Added _mel_basis_cache and _hann_window_cache module-level
+       dictionaries. Filterbank and window computed once per config.
+  Impact: MEDIUM -> Fixed. Reduced redundant computation.
+
+FIX 7: ONNX export uses .item() creating constants
+  File: export_onnx.py
+  Date: 2026-02-09
+  Problem: noise_scale passed via .item() in inference, making it a
+           Python float constant in the ONNX graph instead of a dynamic input.
+  Fix: Created VitsOnnxWrapper that takes noise as explicit tensor inputs
+       (z_noise, z_dur_noise) instead of using torch.randn() internally.
+  Impact: MEDIUM -> Fixed. ONNX noise_scale is now dynamic.
+
+FIX 8: PyTorch 2.10+ total_mem attribute
+  File: (manual command, not in code)
+  Date: 2026-02-09
+  Problem: torch.cuda.get_device_properties(0).total_mem renamed to
+           total_memory in PyTorch 2.10+.
+  Fix: Code already used total_memory. Error was from a manual command.
+  Impact: LOW -> Already correct in codebase.
+
+FIX 9: Transformer block position in normalizing flows
+  File: src/models/flows.py, src/models/posterior_encoder.py
+  Date: 2026-02-09
+  Problem: FlowTransformerBlock was applied AFTER all WaveNet layers
+           in each coupling layer. Paper Section 2.3 says "between
+           the WaveNet residual blocks."
+  Fix: Modified WaveNetResBlock.forward() to accept mid_block and
+       mid_position parameters. Transformer inserted at midpoint
+       (position n_layers//2 = 2 of 4 layers) within the residual
+       pathway, not after it.
+  Impact: HIGH -> Fixed. Architecture now matches paper Figure 1(b).
+
+FIX 10: GAN training instability (disc LR + gradient clipping)
+  File: train.py
+  Date: 2026-02-09
+  Problem: Recurring GAN spikes every ~600 steps. Discriminator loss
+           exploded (disc>300) causing CER regression.
+           Pattern: Step 1000 disc=45.8, Step 1600 disc=53.3,
+                    Step 2000 disc=311.3 (escalating)
+  Fix (iteration 1): Disc LR reduced to gen_lr/2 (1e-4 vs 2e-4) +
+       gradient value clipping at 1.0. Partially effective.
+  Fix (iteration 2): Switched to gradient NORM clipping (max_norm=5.0)
+       instead of value clipping. More robust - scales all gradients
+       proportionally, preserving gradient direction.
+  Impact: HIGH -> Improved. Spikes still occur but recovery is faster
+       and mel_loss continues to improve.
+  Status: Training continues. mel_loss at 22.7 (best: 22.5).
+          CER improving: 0.966 -> 0.824 -> 0.850

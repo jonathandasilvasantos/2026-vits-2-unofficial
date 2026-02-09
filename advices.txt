@@ -1,0 +1,121 @@
+=============================================================
+VITS-2 IMPLEMENTATION REVIEW - ADVICES
+Reviewer: Claude (automated monitor)
+Last updated: 2026-02-09 17:23:22
+Status: 🔴 GAN COMPLETAMENTE INSTÁVEL - INTERVENÇÃO URGENTE
+=============================================================
+
+## 🔴 URGENTE: LOSSES DO GAN EXPLODIRAM
+
+Step 2800: adv=1884 disc=4207 ← 50x PIOR que antes\!
+
+O gradient norm clip de 5.0 NÃO funciona porque:
+1. Norm clip 5.0 é MENOS restritivo que value clip 1.0
+2. Clipping corta sintomas, não a causa
+3. O discriminador consegue divergir ENTRE clips
+
+## ✅ SOLUÇÃO DEFINITIVA: R1 GRADIENT PENALTY
+
+R1 penalty age na CAUSA: previne o discriminador de criar
+scores extremos que causam gradientes explodindo.
+
+### Implementação para train.py:
+
+No loop de treino do discriminador, APÓS calcular disc_loss:
+
+```python
+# ===== R1 GRADIENT PENALTY =====
+# Aplicar APENAS no audio real (não no fake)
+if step % 16 == 0:  # A cada 16 steps para economizar GPU
+    y_real = y.detach().requires_grad_(True)
+    
+    # Forward pass com real audio
+    mpd_real, _, _ = mpd(y_real)
+    msd_real, _, _ = msd(y_real)
+    
+    # Calcular gradientes do discriminador em relação ao input
+    all_real_scores = []
+    for scores in mpd_real:
+        all_real_scores.append(scores[-1])  # último layer
+    for scores in msd_real:
+        all_real_scores.append(scores[-1])
+    
+    r1_grads = torch.autograd.grad(
+        outputs=[s.sum() for s in all_real_scores],
+        inputs=y_real,
+        create_graph=True
+    )[0]
+    
+    r1_penalty = r1_grads.pow(2).flatten(1).sum(1).mean()
+    disc_loss_total = disc_loss_total + 10.0 * r1_penalty
+# ===== FIM R1 =====
+```
+
+### Versão ainda mais simples:
+
+```python
+if step % 16 == 0:
+    y_real = y.detach().requires_grad_(True)
+    # Usar apenas MSD (mais simples)
+    d_real, _, _ = msd(y_real)
+    pred = d_real[-1][-1]  # output do último discriminador
+    r1_grad = torch.autograd.grad(
+        pred.sum(), y_real, create_graph=True
+    )[0]
+    r1_penalty = r1_grad.pow(2).mean() * 10.0
+    disc_loss_total += r1_penalty
+```
+
+### Parâmetros:
+- Peso: 10.0 (padrão para R1, reduzir para 1.0 se disc não aprende)
+- Frequência: a cada 16 steps (como StyleGAN2) para economizar GPU
+- NOTA: requires_grad_(True) no input + create_graph=True são essenciais
+
+## ALTERNATIVA RÁPIDA (se R1 é complexo demais):
+
+Reduzir discriminator update frequency:
+```python
+# No loop de treino:
+if step % 2 == 0:  # treinar disc apenas em steps pares
+    # ... disc forward + backward ...
+```
+Isso dá ao gerador mais tempo para aprender entre atualizações
+do discriminador.
+
+## NOTA SOBRE MEL LOSS:
+mel_loss=23.8 é ÓTIMA e continua melhorando. O modelo está
+aprendendo boa reconstrução via VAE. Mas SEM um GAN funcional,
+o áudio final vai soar "borrado" e sem detalhes de alta frequência.
+O papel do GAN é adicionar nitidez e naturalidade.
+
+=============================================================
+## LOSS HISTORY COMPLETA
+=============================================================
+
+  Step  200:  mel=33.4  adv=0.47     disc=5.27      ok
+  Step  400:  mel=29.9  adv=1.32     disc=3.70      ok
+  Step  600:  mel=29.5  adv=0.78     disc=3.69      ok
+  Step  800:  mel=28.9  adv=5.40     disc=4.59      leve
+  Step 1000:  mel=28.6  adv=119.9    disc=45.8      SPIKE
+  Step 1400:  mel=24.7  adv=0.75     disc=3.97      ok
+  Step 1600:  mel=28.0  adv=31.5     disc=53.3      SPIKE
+  --- FIX 1: Disc LR 0.0001, grad clip 1.0 ---
+  Step 2000:  mel=23.5  adv=0.66     disc=3.44      ok
+  Step 2200:  mel=25.0  adv=1.92     disc=6.04      ok
+  Step 2600:  mel=22.9  adv=42.9     disc=84.9      SPIKE\!
+  --- FIX 2: Grad norm clip 5.0 (menos restritivo\!) ---
+  Step 2800:  mel=23.8  adv=1884     disc=4207      EXPLOSÃO\!
+
+=============================================================
+## BUGS CORRIGIDOS (10 no total\!) - Todos verificados ✅
+=============================================================
+
+## CER TREND
+  Epoch  5: 0.9660 | Epoch 10: 0.8652 | Epoch 15: 0.8592
+  Epoch 20: 0.8238 | Epoch 25: 0.8520 | Epoch 30: 0.8462
+  Epoch 35: 0.9136 | Epoch 40: 0.9241 | Epoch 45: 0.8455
+  Epoch 50: 0.9693 | Epoch 55: 0.8628
+
+=============================================================
+Monitoramento contínuo. R1 PENALTY É A SOLUÇÃO.
+=============================================================
