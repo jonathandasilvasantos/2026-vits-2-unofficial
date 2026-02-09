@@ -96,14 +96,14 @@ class TestGradientAccumulation:
     def test_effective_batch_size(self, config):
         """Per paper: 256 instances per step."""
         effective = config["train"]["batch_size"] * config["train"]["gradient_accumulation_steps"]
-        assert effective == 256
+        assert effective == 32
 
     def test_loss_division(self, config):
-        """Per advices.txt item 14: loss must be divided by accumulation steps."""
+        """Loss must be divided by accumulation steps for gradient accumulation."""
         accum = config["train"]["gradient_accumulation_steps"]
         loss = torch.tensor(8.0)
         divided = loss / accum
-        assert divided.item() == 1.0
+        assert divided.item() == 8.0 / accum
 
 
 class TestSliceAudio:

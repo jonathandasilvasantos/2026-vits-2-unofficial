@@ -10,7 +10,7 @@
     "weight_decay": 0.01,
     "lr_decay": 0.999875,
     "batch_size": 32,
-    "gradient_accumulation_steps": 8,
+    "gradient_accumulation_steps": 1,
     "fp16_run": true,
     "segment_size": 8192,
     "main_training_steps": 800000,

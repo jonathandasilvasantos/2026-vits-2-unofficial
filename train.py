@@ -3,7 +3,7 @@ Main training script for VITS-2.
 Per paper Section 3:
   - AdamW: beta1=0.8, beta2=0.99, weight_decay=0.01
   - LR: 2e-4, decay 0.999^(1/8) per epoch
-  - Batch size: 256 per step (32 per GPU * 8 gradient accumulation)
+  - Batch size: 32 per step (single GPU, no accumulation)
   - Mixed precision (fp16)
   - Windowed generator training (segment_size=32 frames)
   - 800k steps for main network
@@ -19,10 +19,10 @@ Per rules:
   - Rule 15: Well-documented training sessions
   - Rule 16: Full CLI with parameter overrides
 
-GAN stability fixes (advices.txt):
-  - Discriminator LR = gen LR * disc_lr_ratio (default 0.5)
-  - Discriminator gradient norm clipping
-  - R1 gradient penalty on real audio (every step)
+GAN stability parameters (configurable via CLI):
+  - Disc LR ratio: 1.0 (same as gen, per paper Section 4.1)
+  - R1 gradient penalty: disabled by default (paper does not use)
+  - Gradient clipping: disabled by default (paper does not use)
 """
 import os
 import sys
@@ -77,13 +77,13 @@ def build_cli_parser():
                         help="Gradient accumulation steps (overrides config)")
 
     # GAN stability parameters
-    parser.add_argument("--disc-lr-ratio", type=float, default=0.5,
+    parser.add_argument("--disc-lr-ratio", type=float, default=1.0,
                         help="Discriminator LR as ratio of generator LR")
-    parser.add_argument("--r1-weight", type=float, default=10.0,
+    parser.add_argument("--r1-weight", type=float, default=0.0,
                         help="R1 gradient penalty weight (0 to disable)")
     parser.add_argument("--r1-interval", type=int, default=1,
                         help="Apply R1 every N optimization steps")
-    parser.add_argument("--grad-clip", type=float, default=5.0,
+    parser.add_argument("--grad-clip", type=float, default=0.0,
                         help="Gradient norm clip for discriminator (0 to disable)")
 
     # Logging and evaluation

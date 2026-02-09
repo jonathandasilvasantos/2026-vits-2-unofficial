@@ -33,10 +33,10 @@ class TestCLIParser:
         assert args.batch_size is None
         assert args.max_steps is None
         assert args.accum_steps is None
-        assert args.disc_lr_ratio == 0.5
-        assert args.r1_weight == 10.0
+        assert args.disc_lr_ratio == 1.0
+        assert args.r1_weight == 0.0
         assert args.r1_interval == 1
-        assert args.grad_clip == 5.0
+        assert args.grad_clip == 0.0
         assert args.log_interval is None
         assert args.eval_interval is None
         assert args.whisper_interval is None
