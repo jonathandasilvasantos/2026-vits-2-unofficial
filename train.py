@@ -18,6 +18,7 @@ Per rules:
 GAN stability fixes (advices.txt):
   - Discriminator LR = gen LR / 2 (1e-4 vs 2e-4)
   - Discriminator gradient norm clipping (max_norm=5.0)
+  - R1 gradient penalty on real audio (weight=10.0, every 16 steps)
 """
 import os
 import sys
@@ -243,6 +244,7 @@ def train(config_path, checkpoint_path=None):
     print(f"  Generator LR: {train_cfg['learning_rate']}")
     print(f"  Discriminator LR: {disc_lr} (gen LR / 2, advices.txt fix)")
     print(f"  Disc gradient norm clip: 5.0 (advices.txt fix)")
+    print(f"  R1 gradient penalty: weight=10.0, every 16 steps (advices.txt fix)")
     print(f"  Whisper validation every {whisper_interval} epochs")
     print(f"  Starting from epoch {start_epoch}, step {global_step}\n")
 
@@ -330,7 +332,24 @@ def train(config_path, checkpoint_path=None):
 
                 loss_disc = (loss_disc_mpd + loss_disc_msd) / accum_steps
 
-            scaler.scale(loss_disc).backward()
+            # R1 gradient penalty (advices.txt: prevent disc from creating extreme scores)
+            # Applied every 16 optimization steps to save GPU (like StyleGAN2)
+            loss_r1 = torch.tensor(0.0, device=device)
+            if global_step % 16 == 0:
+                y_real_r1 = y_real.detach().requires_grad_(True)
+                # Run through MSD sub-discriminators only (simpler, sufficient)
+                with autocast("cuda", enabled=False):
+                    for sub_d in msd.discriminators:
+                        d_out, _ = sub_d(y_real_r1)
+                        r1_grads = torch.autograd.grad(
+                            outputs=d_out.sum(),
+                            inputs=y_real_r1,
+                            create_graph=True,
+                        )[0]
+                        loss_r1 = loss_r1 + r1_grads.pow(2).flatten(1).sum(1).mean()
+                loss_r1 = loss_r1 * 10.0 / accum_steps
+
+            scaler.scale(loss_disc + loss_r1).backward()
 
             if (batch_idx + 1) % accum_steps == 0:
                 scaler.unscale_(optim_d)
@@ -378,6 +397,7 @@ def train(config_path, checkpoint_path=None):
                         f"mel={loss_mel.item():.3f} kl={loss_kl.item():.3f} "
                         f"adv={loss_adv.item():.3f} fm={loss_fm.item():.3f} "
                         f"disc={loss_disc.item() * accum_steps:.3f} "
+                        f"r1={loss_r1.item() * accum_steps:.3f} "
                         f"lr_g={lr_g:.6f} lr_d={lr_d:.6f}"
                     )
                     writer.add_scalar("loss/mel", loss_mel.item(), global_step)
@@ -385,6 +405,7 @@ def train(config_path, checkpoint_path=None):
                     writer.add_scalar("loss/adv_g", loss_adv.item(), global_step)
                     writer.add_scalar("loss/fm", loss_fm.item(), global_step)
                     writer.add_scalar("loss/disc", loss_disc.item() * accum_steps, global_step)
+                    writer.add_scalar("loss/r1", loss_r1.item() * accum_steps, global_step)
                     writer.add_scalar("lr/gen", lr_g, global_step)
                     writer.add_scalar("lr/disc", lr_d, global_step)
 
