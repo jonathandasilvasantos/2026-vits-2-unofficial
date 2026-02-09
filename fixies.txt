@@ -116,3 +116,27 @@ FIX 11: R1 gradient penalty for GAN stability
        R1 penalizes ||grad_x D(x_real)||^2, preventing discriminator
        from creating extreme output scores.
   Impact: HIGH -> Applied. Monitoring for effectiveness.
+
+FIX 11: R1 gradient penalty frequency fix
+  File: train.py
+  Date: 2026-02-09
+  Problem: R1 penalty was applied every 16 optimization steps, but with
+           only 6 optimization steps per epoch (48 batches / 8 accum),
+           R1 fired only once every ~2.7 epochs. Completely insufficient
+           for stabilizing GAN training.
+  Fix: Changed r1_interval default from 16 to 1 (every optimization step).
+       Made configurable via --r1-interval CLI flag.
+       Extracted compute_r1_penalty() as standalone function for testability.
+  Impact: CRITICAL -> Fixed. R1 now fires every step for proper regularization.
+
+FIX 12: Full CLI with parameter overrides (Rule 16)
+  File: train.py, tests/test_cli.py
+  Date: 2026-02-09
+  Problem: train.py only had --config, --checkpoint, --skip-tests flags.
+           No way to override training parameters without editing config.json.
+  Fix: Added CLI flags: --lr, --batch-size, --max-steps, --accum-steps,
+       --disc-lr-ratio, --r1-weight, --r1-interval, --grad-clip,
+       --log-interval, --eval-interval, --whisper-interval,
+       --c-mel, --c-kl, --lambda-fm.
+       31 unit tests for CLI parsing and config override.
+  Impact: MEDIUM -> Fixed. All parameters controllable from command line.
