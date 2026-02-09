@@ -28,3 +28,7 @@ VITS-2 Project Rules
 13) Training sessions must provide TensorBoard logging for real-time monitoring of losses, learning rates, and validation metrics. TensorBoard logs are saved in ./logs/ directory.
 
 14) Training pipeline must preserve checkpoint milestones with smart disk storage management. Strategy: keep latest checkpoint (overwritten each epoch), keep checkpoints at eval_interval steps (1000, 2000, ...), and keep best CER checkpoint. Remove intermediate epoch checkpoints older than 5 epochs to save disk space. Never delete milestone checkpoints.
+
+15) All training sessions must be well documented. Every training run must log: configuration used, start time, hardware info, loss curves, and any modifications made. Training documentation should be clear enough for another developer to reproduce the experiment.
+
+16) Training pipeline must have a full CLI (command-line interface) allowing all key parameters to be set through command-line arguments (learning rate, batch size, max steps, discriminator LR ratio, R1 weight, gradient clipping, eval interval, etc.). The CLI must have full unit test coverage. Config file provides defaults, CLI arguments override them.

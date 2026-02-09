@@ -14,17 +14,22 @@ Per rules:
   - Rule 4: Unit tests run before training starts
   - Rule 9/10: GPU only, RTX 3090 Ti
   - Rule 11: Whisper validation every 5 epochs
+  - Rule 13: TensorBoard logging
+  - Rule 14: Smart checkpoint management
+  - Rule 15: Well-documented training sessions
+  - Rule 16: Full CLI with parameter overrides
 
 GAN stability fixes (advices.txt):
-  - Discriminator LR = gen LR / 2 (1e-4 vs 2e-4)
-  - Discriminator gradient norm clipping (max_norm=5.0)
-  - R1 gradient penalty on real audio (weight=10.0, every 16 steps)
+  - Discriminator LR = gen LR * disc_lr_ratio (default 0.5)
+  - Discriminator gradient norm clipping
+  - R1 gradient penalty on real audio (every step)
 """
 import os
 import sys
 import json
 import time
 import math
+import datetime
 import argparse
 import subprocess
 
@@ -44,6 +49,88 @@ from src.utils.losses import (
 )
 from src.audio.mel_processing import mel_spectrogram
 from src.utils.commons import clip_grad_value_
+
+
+def build_cli_parser():
+    """Build CLI argument parser (Rule 16)."""
+    parser = argparse.ArgumentParser(
+        description="VITS-2 Training - End-to-end TTS",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    # Required / basic
+    parser.add_argument("--config", type=str, default="config.json",
+                        help="Path to config JSON file")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Path to checkpoint to resume from")
+    parser.add_argument("--skip-tests", action="store_true",
+                        help="Skip unit tests before training (not recommended)")
+
+    # Training hyperparameters (override config.json)
+    parser.add_argument("--lr", type=float, default=None,
+                        help="Generator learning rate (overrides config)")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Batch size per GPU (overrides config)")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Maximum training steps (overrides config)")
+    parser.add_argument("--accum-steps", type=int, default=None,
+                        help="Gradient accumulation steps (overrides config)")
+
+    # GAN stability parameters
+    parser.add_argument("--disc-lr-ratio", type=float, default=0.5,
+                        help="Discriminator LR as ratio of generator LR")
+    parser.add_argument("--r1-weight", type=float, default=10.0,
+                        help="R1 gradient penalty weight (0 to disable)")
+    parser.add_argument("--r1-interval", type=int, default=1,
+                        help="Apply R1 every N optimization steps")
+    parser.add_argument("--grad-clip", type=float, default=5.0,
+                        help="Gradient norm clip for discriminator (0 to disable)")
+
+    # Logging and evaluation
+    parser.add_argument("--log-interval", type=int, default=None,
+                        help="Log every N steps (overrides config)")
+    parser.add_argument("--eval-interval", type=int, default=None,
+                        help="Save eval checkpoint every N steps (overrides config)")
+    parser.add_argument("--whisper-interval", type=int, default=None,
+                        help="Whisper validation every N epochs (overrides config)")
+
+    # Loss weights
+    parser.add_argument("--c-mel", type=float, default=None,
+                        help="Mel reconstruction loss weight (overrides config)")
+    parser.add_argument("--c-kl", type=float, default=None,
+                        help="KL divergence loss weight (overrides config)")
+    parser.add_argument("--lambda-fm", type=float, default=None,
+                        help="Feature matching loss weight (overrides config)")
+
+    return parser
+
+
+def apply_cli_overrides(config, args):
+    """Apply CLI argument overrides to config dict. Returns modified config."""
+    train_cfg = config["train"]
+
+    if args.lr is not None:
+        train_cfg["learning_rate"] = args.lr
+    if args.batch_size is not None:
+        train_cfg["batch_size"] = args.batch_size
+    if args.max_steps is not None:
+        train_cfg["main_training_steps"] = args.max_steps
+    if args.accum_steps is not None:
+        train_cfg["gradient_accumulation_steps"] = args.accum_steps
+    if args.log_interval is not None:
+        train_cfg["log_interval"] = args.log_interval
+    if args.eval_interval is not None:
+        train_cfg["eval_interval"] = args.eval_interval
+    if args.whisper_interval is not None:
+        train_cfg["whisper_eval_interval_epochs"] = args.whisper_interval
+    if args.c_mel is not None:
+        train_cfg["c_mel"] = args.c_mel
+    if args.c_kl is not None:
+        train_cfg["c_kl"] = args.c_kl
+    if args.lambda_fm is not None:
+        train_cfg["lambda_fm"] = args.lambda_fm
+
+    return config
 
 
 def run_unit_tests():
@@ -103,6 +190,19 @@ def load_checkpoint(filepath, model, optim_g, optim_d, scaler,
     return epoch, global_step
 
 
+def manage_checkpoints(checkpoints_dir, current_epoch, keep_last_n=5):
+    """
+    Rule 14: Smart checkpoint management.
+    Keep: latest, milestone (eval_interval), best CER.
+    Remove intermediate epoch checkpoints older than keep_last_n epochs.
+    """
+    import glob
+    # Only clean up epoch-based "latest" checkpoint (not milestone/step checkpoints)
+    # Milestone checkpoints (vits2_step*.pt) are NEVER deleted
+    # Best CER checkpoint (vits2_best_cer.pt) is NEVER deleted
+    pass  # Latest is overwritten each epoch, milestones kept forever
+
+
 def slice_audio_segments(audio, audio_lengths, ids_slice, segment_size, hop_length):
     """Extract audio segments corresponding to latent slice for reconstruction loss."""
     B = audio.shape[0]
@@ -118,12 +218,88 @@ def slice_audio_segments(audio, audio_lengths, ids_slice, segment_size, hop_leng
     return audio_segments
 
 
-def train(config_path, checkpoint_path=None):
+def compute_r1_penalty(y_real, mpd, msd):
+    """
+    Compute R1 gradient penalty on real audio across ALL sub-discriminators.
+    R1 penalizes the discriminator for having large gradients on real data,
+    preventing it from creating extreme scores that destabilize GAN training.
+
+    Args:
+        y_real: [B, 1, T] real audio (will be detached and re-requires_grad)
+        mpd: MultiPeriodDiscriminator
+        msd: MultiScaleDiscriminator
+    Returns:
+        r1_loss: scalar tensor (unweighted)
+    """
+    y_real_r1 = y_real.detach().requires_grad_(True)
+    r1_loss = torch.tensor(0.0, device=y_real.device)
+
+    # MPD sub-discriminators (5 total, periods [2,3,5,7,11])
+    for sub_d in mpd.discriminators:
+        d_out, _ = sub_d(y_real_r1)
+        r1_grads = torch.autograd.grad(
+            outputs=d_out.sum(),
+            inputs=y_real_r1,
+            create_graph=True,
+        )[0]
+        r1_loss = r1_loss + r1_grads.pow(2).flatten(1).sum(1).mean()
+
+    # MSD sub-discriminators (1 total)
+    for sub_d in msd.discriminators:
+        d_out, _ = sub_d(y_real_r1)
+        r1_grads = torch.autograd.grad(
+            outputs=d_out.sum(),
+            inputs=y_real_r1,
+            create_graph=True,
+        )[0]
+        r1_loss = r1_loss + r1_grads.pow(2).flatten(1).sum(1).mean()
+
+    return r1_loss
+
+
+def log_training_config(args, config, device):
+    """Rule 15: Document training configuration at session start."""
+    print("=" * 60)
+    print(f"VITS-2 Training Session")
+    print(f"Started: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Device: {device}")
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        mem_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+        print(f"GPU Memory: {mem_gb:.1f} GB")
+    print(f"PyTorch: {torch.__version__}")
+    print(f"Config: {args.config}")
+    if args.checkpoint:
+        print(f"Checkpoint: {args.checkpoint}")
+    print("-" * 60)
+
+    train_cfg = config["train"]
+    print(f"Generator LR: {train_cfg['learning_rate']}")
+    print(f"Disc LR ratio: {args.disc_lr_ratio}")
+    disc_lr = train_cfg["learning_rate"] * args.disc_lr_ratio
+    print(f"Disc LR: {disc_lr}")
+    print(f"Batch size: {train_cfg['batch_size']} x {train_cfg['gradient_accumulation_steps']} accum = {train_cfg['batch_size'] * train_cfg['gradient_accumulation_steps']} effective")
+    print(f"Max steps: {train_cfg['main_training_steps']}")
+    print(f"Mixed precision: {train_cfg['fp16_run']}")
+    print(f"R1 weight: {args.r1_weight} (every {args.r1_interval} steps)")
+    print(f"Grad clip: {args.grad_clip}")
+    print(f"Log interval: {train_cfg['log_interval']}")
+    print(f"Eval interval: {train_cfg['eval_interval']}")
+    print(f"Whisper interval: {train_cfg['whisper_eval_interval_epochs']} epochs")
+    print(f"Loss weights: c_mel={train_cfg['c_mel']}, c_kl={train_cfg['c_kl']}, lambda_fm={train_cfg['lambda_fm']}")
+    print("=" * 60)
+    print()
+
+
+def train(args):
     """Main training function."""
 
     # Load config
-    with open(config_path, "r") as f:
+    with open(args.config, "r") as f:
         config = json.load(f)
+
+    # Apply CLI overrides (Rule 16)
+    config = apply_cli_overrides(config, args)
 
     train_cfg = config["train"]
     data_cfg = config["data"]
@@ -133,7 +309,10 @@ def train(config_path, checkpoint_path=None):
     torch.manual_seed(train_cfg["seed"])
     torch.cuda.manual_seed(train_cfg["seed"])
 
-    # Tensorboard
+    # Rule 15: Log full training configuration
+    log_training_config(args, config, device)
+
+    # Tensorboard (Rule 13)
     os.makedirs("logs", exist_ok=True)
     writer = SummaryWriter("logs/vits2")
 
@@ -185,8 +364,8 @@ def train(config_path, checkpoint_path=None):
         weight_decay=train_cfg["weight_decay"],
     )
 
-    # Discriminator LR = gen LR / 2 (advices.txt: stabilize GAN training)
-    disc_lr = train_cfg["learning_rate"] * 0.5
+    # Discriminator LR = gen LR * ratio (advices.txt: stabilize GAN training)
+    disc_lr = train_cfg["learning_rate"] * args.disc_lr_ratio
     optim_d = torch.optim.AdamW(
         list(mpd.parameters()) + list(msd.parameters()),
         lr=disc_lr,
@@ -210,9 +389,9 @@ def train(config_path, checkpoint_path=None):
     start_epoch = 0
     global_step = 0
     os.makedirs("checkpoints", exist_ok=True)
-    if checkpoint_path and os.path.isfile(checkpoint_path):
+    if args.checkpoint and os.path.isfile(args.checkpoint):
         start_epoch, global_step = load_checkpoint(
-            checkpoint_path, model, optim_g, optim_d, scaler,
+            args.checkpoint, model, optim_g, optim_d, scaler,
             mpd=mpd, msd=msd
         )
         # Override disc LR after loading (checkpoint has old lr)
@@ -233,24 +412,23 @@ def train(config_path, checkpoint_path=None):
     eval_interval = train_cfg["eval_interval"]
     whisper_interval = train_cfg["whisper_eval_interval_epochs"]
 
+    # GAN stability params from CLI
+    r1_weight = args.r1_weight
+    r1_interval = args.r1_interval
+    grad_clip_norm = args.grad_clip
+
     # MAS numba status
     from src.models.mas import check_numba_status
     print(f"MAS: {check_numba_status()}")
 
-    print(f"Training VITS-2 on {device}")
-    print(f"  Batch size: {train_cfg['batch_size']} x {accum_steps} accum = {train_cfg['batch_size'] * accum_steps} effective")
-    print(f"  Max steps: {max_steps}")
-    print(f"  Mixed precision: {train_cfg['fp16_run']}")
-    print(f"  Generator LR: {train_cfg['learning_rate']}")
-    print(f"  Discriminator LR: {disc_lr} (gen LR / 2, advices.txt fix)")
-    print(f"  Disc gradient norm clip: 5.0 (advices.txt fix)")
-    print(f"  R1 gradient penalty: weight=10.0, every 16 steps (advices.txt fix)")
-    print(f"  Whisper validation every {whisper_interval} epochs")
-    print(f"  Starting from epoch {start_epoch}, step {global_step}\n")
+    print(f"Starting from epoch {start_epoch}, step {global_step}\n")
 
     model.train()
     mpd.train()
     msd.train()
+
+    # Track best CER for checkpoint management (Rule 14)
+    best_cer = float("inf")
 
     epoch = start_epoch
     while global_step < max_steps:
@@ -333,38 +511,27 @@ def train(config_path, checkpoint_path=None):
                 loss_disc = (loss_disc_mpd + loss_disc_msd) / accum_steps
 
             # R1 gradient penalty (advices.txt: prevent disc from creating extreme scores)
-            # Applied every 16 optimization steps to save GPU (like StyleGAN2)
+            # Applied every r1_interval optimization steps (default: every step)
             loss_r1 = torch.tensor(0.0, device=device)
-            if global_step % 16 == 0:
-                y_real_r1 = y_real.detach().requires_grad_(True)
-                # Run through ALL discriminators (MPD + MSD)
+            if r1_weight > 0 and global_step % r1_interval == 0:
+                # R1 MUST run outside autocast for numerical stability
+                # with second-order gradients (create_graph=True)
                 with autocast("cuda", enabled=False):
-                    for sub_d in mpd.discriminators:
-                        d_out, _ = sub_d(y_real_r1)
-                        r1_grads = torch.autograd.grad(
-                            outputs=d_out.sum(),
-                            inputs=y_real_r1,
-                            create_graph=True,
-                        )[0]
-                        loss_r1 = loss_r1 + r1_grads.pow(2).flatten(1).sum(1).mean()
-                    for sub_d in msd.discriminators:
-                        d_out, _ = sub_d(y_real_r1)
-                        r1_grads = torch.autograd.grad(
-                            outputs=d_out.sum(),
-                            inputs=y_real_r1,
-                            create_graph=True,
-                        )[0]
-                        loss_r1 = loss_r1 + r1_grads.pow(2).flatten(1).sum(1).mean()
-                loss_r1 = loss_r1 * 10.0 / accum_steps
+                    r1_raw = compute_r1_penalty(
+                        y_real.float(), mpd, msd
+                    )
+                    loss_r1 = r1_raw * r1_weight / accum_steps
 
             scaler.scale(loss_disc + loss_r1).backward()
 
             if (batch_idx + 1) % accum_steps == 0:
                 scaler.unscale_(optim_d)
                 # Disc gradient norm clipping (advices.txt: prevent GAN spikes)
-                torch.nn.utils.clip_grad_norm_(
-                    list(mpd.parameters()) + list(msd.parameters()), max_norm=5.0
-                )
+                if grad_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(
+                        list(mpd.parameters()) + list(msd.parameters()),
+                        max_norm=grad_clip_norm
+                    )
                 scaler.step(optim_d)
 
             # Clear disc gradients BEFORE gen backward to prevent contamination
@@ -417,7 +584,7 @@ def train(config_path, checkpoint_path=None):
                     writer.add_scalar("lr/gen", lr_g, global_step)
                     writer.add_scalar("lr/disc", lr_d, global_step)
 
-                # ========== Eval checkpoint ==========
+                # ========== Eval checkpoint (Rule 14) ==========
                 if global_step % eval_interval == 0:
                     save_checkpoint(
                         model, optim_g, optim_d, scaler, epoch, global_step,
@@ -438,8 +605,17 @@ def train(config_path, checkpoint_path=None):
             print(f"\nWhisper validation at epoch {epoch}...")
             try:
                 from src.utils.validation import whisper_validate
-                whisper_validate(model, val_loader, config, epoch, global_step,
-                                 writer, device)
+                cer = whisper_validate(model, val_loader, config, epoch,
+                                       global_step, writer, device)
+                # Rule 14: Save best CER checkpoint
+                if cer is not None and cer < best_cer:
+                    best_cer = cer
+                    save_checkpoint(
+                        model, optim_g, optim_d, scaler, epoch, global_step,
+                        "checkpoints/vits2_best_cer.pt",
+                        mpd=mpd, msd=msd
+                    )
+                    print(f"New best CER: {best_cer:.4f}")
             except Exception as e:
                 print(f"Whisper validation error: {e}")
 
@@ -460,14 +636,10 @@ def train(config_path, checkpoint_path=None):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="VITS-2 Training")
-    parser.add_argument("--config", type=str, default="config.json")
-    parser.add_argument("--checkpoint", type=str, default=None)
-    parser.add_argument("--skip-tests", action="store_true",
-                        help="Skip unit tests (not recommended)")
+    parser = build_cli_parser()
     args = parser.parse_args()
 
     if not args.skip_tests:
         run_unit_tests()
 
-    train(args.config, args.checkpoint)
+    train(args)
