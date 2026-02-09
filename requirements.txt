@@ -1,0 +1,36 @@
+# PyTorch with CUDA support
+torch>=2.3.0
+torchaudio>=2.3.0
+
+# Audio processing
+librosa>=0.10.0
+soundfile>=0.12.0
+scipy>=1.11.0
+
+# Text processing (normalized text, no phonemizer per VITS2 paper Section 4.4)
+# Character-level input, end-to-end approach
+
+# Mel-spectrogram and signal processing
+numpy>=1.24.0
+
+# Monotonic Alignment Search (numba for 10-50x speedup over pure Python)
+numba>=0.58.0
+
+# Validation with Whisper
+openai-whisper>=20231117
+
+# Training utilities
+tensorboard>=2.14.0
+
+# ONNX export
+onnx>=1.14.0
+onnxruntime-gpu>=1.16.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Utilities
+tqdm>=4.66.0
+matplotlib>=3.8.0
+pyyaml>=6.0.0

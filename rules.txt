@@ -1,0 +1,26 @@
+VITS-2 Project Rules
+====================
+
+1) All training sessions will run in a NVIDIA Docker container. This container must be mirrored to the ./ host directory (/home/bender/projects/vits-2), in other words, all files of this container must be visible and accessible on the ./ folder.
+
+2) All training sessions must run in the tmux session called "shared", while all terminal source code work must be done in the tmux session called "main".
+
+3) We are coding the VITS-2 TTS Paper using LJSpeech-1.1, so we need to follow strictly what the paper does. No adaptations, no simplifications. We need to build deeply and reconstruct deeply the results from this paper.
+
+4) All generated code must be tested with unit tests. All training sessions must start by running these unit tests.
+
+5) The code must be generated thinking to be ported to ONNX, so research and use best practices to do it.
+
+6) Every step of coding, architecture, decisions, steps, and technical details must be added on ./tech.txt as a non-markdown format (no --- or ==== please). It must be kept updated at all times, as always as possible.
+
+7) Always read ./advices.txt when starting a session or as often as possible. This file is written by the user and contains personal advices and guidance about the project.
+
+8) Our implementation follows strictly the architecture described in the VITS-2 paper. No deviations from the paper's described architecture.
+
+9) All training sessions must use GPU accelerated computing. No CPU training.
+
+10) Just one training session at a time, and it must use the most of our hardware GPU (NVIDIA GeForce RTX 3090 Ti, 24GB VRAM, CUDA 12.5).
+
+11) During training sessions, every 5 epochs, validate the generated audio using the Whisper model (small weights). Save the synthesized audio to ./synth/ directory on the host (/home/bender/projects/vits-2/synth/).
+
+12) Do not use phoneme transcriptions for text input. Use normalized text (character-level) as described in VITS-2 paper Section 4.4, enabling a fully end-to-end single-stage approach.
