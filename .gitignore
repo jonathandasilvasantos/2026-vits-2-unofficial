@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# PyTorch weights and checkpoints
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Dataset
+data/LJSpeech-1.1/
+data/filelists/
+
+# Training outputs
+logs/
+synth/
+*.log
+
+# Docker
+.dockerignore
+
+# ONNX models
+*.onnx
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Numba cache
+__pycache__/
+
+# Misc
+*.bak
+train.py.bak
