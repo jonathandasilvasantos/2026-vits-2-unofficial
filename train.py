@@ -337,8 +337,16 @@ def train(config_path, checkpoint_path=None):
             loss_r1 = torch.tensor(0.0, device=device)
             if global_step % 16 == 0:
                 y_real_r1 = y_real.detach().requires_grad_(True)
-                # Run through MSD sub-discriminators only (simpler, sufficient)
+                # Run through ALL discriminators (MPD + MSD)
                 with autocast("cuda", enabled=False):
+                    for sub_d in mpd.discriminators:
+                        d_out, _ = sub_d(y_real_r1)
+                        r1_grads = torch.autograd.grad(
+                            outputs=d_out.sum(),
+                            inputs=y_real_r1,
+                            create_graph=True,
+                        )[0]
+                        loss_r1 = loss_r1 + r1_grads.pow(2).flatten(1).sum(1).mean()
                     for sub_d in msd.discriminators:
                         d_out, _ = sub_d(y_real_r1)
                         r1_grads = torch.autograd.grad(
