@@ -103,3 +103,16 @@ FIX 10: GAN training instability (disc LR + gradient clipping)
        and mel_loss continues to improve.
   Status: Training continues. mel_loss at 22.7 (best: 22.5).
           CER improving: 0.966 -> 0.824 -> 0.850
+
+FIX 11: R1 gradient penalty for GAN stability
+  File: train.py
+  Date: 2026-02-09
+  Problem: GAN losses exploding periodically despite disc LR reduction
+           and gradient clipping. Disc loss reached 4207 at step 2800.
+           Spikes degraded CER from 0.824 to 0.969.
+  Fix: Added R1 gradient penalty on real audio in discriminator step.
+       Computed every 16 optimization steps using MSD sub-discriminators.
+       Weight=10.0 (StyleGAN2 standard), float32 precision.
+       R1 penalizes ||grad_x D(x_real)||^2, preventing discriminator
+       from creating extreme output scores.
+  Impact: HIGH -> Applied. Monitoring for effectiveness.
