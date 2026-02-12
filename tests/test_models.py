@@ -95,28 +95,32 @@ class TestNormalizingFlows:
 
     def test_forward_inverse(self, config, device):
         from src.models.flows import ResidualCouplingBlock
-        m = config["model"]
+        mc = config["model"]
         flow = ResidualCouplingBlock(
-            m["inter_channels"], m["hidden_channels"],
-            m["flow_kernel_size"], m["flow_dilation_rate"],
-            m["n_flow_wn_layers"], n_flows=m["n_flow_layers"],
-            use_transformer=True
+            mc["inter_channels"], mc["hidden_channels"],
+            mc["flow_kernel_size"], mc["flow_dilation_rate"],
+            mc["n_flow_wn_layers"], n_flows=mc["n_flow_layers"],
+            use_transformer_flow=True
         ).to(device)
         B, T = 2, 30
-        z = torch.randn(B, m["inter_channels"], T, device=device)
+        z = torch.randn(B, mc["inter_channels"], T, device=device)
+        m = torch.randn(B, mc["inter_channels"], T, device=device)
+        logs = torch.randn(B, mc["inter_channels"], T, device=device)
         mask = torch.ones(B, 1, T, device=device)
         # Forward
-        z_p = flow(z, mask, reverse=False)
+        z_p, m_p, logs_p = flow(z, m, logs, mask, reverse=False)
         assert z_p.shape == z.shape
+        assert m_p.shape == m.shape
+        assert logs_p.shape == logs.shape
         # Inverse should approximately recover original
-        z_rec = flow(z_p, mask, reverse=True)
-        assert z_rec.shape == z.shape
-        # Should be close (volume-preserving, shift only)
+        z_rec, m_rec, logs_rec = flow(z_p, m_p, logs_p, mask, reverse=True)
         assert torch.allclose(z, z_rec, atol=1e-4)
+        assert torch.allclose(m, m_rec, atol=1e-4)
+        assert torch.allclose(logs, logs_rec, atol=1e-4)
 
-    def test_transformer_block(self, config, device):
-        from src.models.flows import FlowTransformerBlock
-        tb = FlowTransformerBlock(192, n_heads=2).to(device)
+    def test_flow_pre_transformer(self, config, device):
+        from src.models.flows import FlowPreTransformer
+        tb = FlowPreTransformer(192, n_heads=2).to(device)
         x = torch.randn(2, 192, 30, device=device)
         mask = torch.ones(2, 1, 30, device=device)
         out = tb(x, mask)
@@ -263,6 +267,19 @@ class TestLosses:
         loss, _, _ = discriminator_loss(real, fake)
         assert loss.item() >= 0
 
+    def test_kl_loss_normal(self):
+        from src.utils.losses import kl_loss_normal
+        # Identical distributions -> KL ≈ 0
+        m = torch.randn(2, 192, 30)
+        logs = torch.randn(2, 192, 30)
+        mask = torch.ones(2, 1, 30)
+        kl = kl_loss_normal(m, logs, m, logs, mask)
+        assert torch.abs(kl) < 1e-5
+        # Different means -> KL > 0
+        m2 = m + 5.0
+        kl_diff = kl_loss_normal(m2, logs, m, logs, mask)
+        assert kl_diff.item() > 0
+
     def test_feature_matching_loss(self):
         from src.utils.losses import feature_matching_loss
         fmap_r = [[torch.randn(2, 32, 100)] for _ in range(6)]
@@ -308,11 +325,13 @@ class TestFullModel:
         mel_len = torch.tensor([T_mel, 50], device=device)
         out = model(x, x_len, mel, mel_len, global_step=0)
         assert "o" in out
-        assert "z_p" in out
-        assert "m_p" in out
-        assert "logs_p" in out
+        assert "z_q_dur" in out
+        assert "m_p_dur" in out
+        assert "logs_p_dur" in out
         assert "m_q" in out
         assert "logs_q" in out
+        assert "m_p_audio" in out
+        assert "logs_p_audio" in out
         assert "attn" in out
         assert "log_w" in out
         seg_size = config["train"]["segment_size"] // d["hop_length"]

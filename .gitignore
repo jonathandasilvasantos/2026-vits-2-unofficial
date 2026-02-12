@@ -44,4 +44,5 @@ __pycache__/
 
 # Misc
 *.bak
-train.py.bak
+*.pdf
+.pytest_cache/

@@ -31,6 +31,21 @@ def kl_loss(z_p, logs_q, m_p, logs_p, z_mask):
     return l
 
 
+def kl_loss_normal(m_q, logs_q, m_p, logs_p, z_mask):
+    """Closed-form KL divergence between two diagonal Gaussians.
+    KL[N(m_q, sigma_q) || N(m_p, sigma_p)]
+    Used for audio-space KL in VITS-2 dual-KL framework."""
+    m_q = m_q.float()
+    logs_q = logs_q.float()
+    m_p = m_p.float()
+    logs_p = logs_p.float()
+    z_mask = z_mask.float()
+    kl = logs_p - logs_q - 0.5
+    kl += 0.5 * (torch.exp(2.0 * logs_q) + (m_q - m_p) ** 2) * torch.exp(-2.0 * logs_p)
+    kl = torch.sum(kl * z_mask)
+    return kl / torch.sum(z_mask)
+
+
 def generator_loss(disc_outputs):
     """
     Least-squares GAN generator loss.

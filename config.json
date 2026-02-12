@@ -17,7 +17,8 @@
     "dp_training_steps": 30000,
     "whisper_eval_interval_epochs": 5,
     "c_mel": 45,
-    "c_kl": 1.0,
+    "c_kl_dur": 2.0,
+    "c_kl_audio": 0.05,
     "lambda_fm": 2.0
   },
   "data": {
@@ -55,7 +56,8 @@
     "flow_kernel_size": 5,
     "flow_dilation_rate": 1,
     "mas_noise_scale_initial": 0.01,
-    "mas_noise_scale_decay": 2e-6
+    "mas_noise_scale_decay": 2e-6,
+    "use_transformer_flow": true
   },
   "inference": {
     "noise_scale": 0.667,
