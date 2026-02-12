@@ -272,26 +272,28 @@ class VitsOnnxWrapper(nn.Module):
         y_lengths = torch.clamp_min(
             torch.sum(w_ceil, dim=[1, 2]).long(), 1
         )  # [B]
-        t_mel = y_lengths.max().item()
 
-        y_mask = (
-            self._sequence_mask(y_lengths, int(t_mel))
-            .unsqueeze(1)
-            .float()
-        )  # [B, 1, T_mel]
+        # Use z_noise time dimension as max mel length (avoids .item()
+        # which bakes a constant during ONNX tracing)
+        max_mel = z_noise.shape[2]
+        mel_ids = torch.arange(max_mel, device=x.device).unsqueeze(0)  # [1, max_mel]
+        y_mask = (mel_ids < y_lengths.unsqueeze(1)).unsqueeze(1).float()  # [B, 1, max_mel]
 
         # 3. Alignment path -----------------------------------------------
-        attn = self._generate_path(w_ceil, y_mask)  # [B, T_text, T_mel]
+        b, _, t_text = w_ceil.shape
+        cum_dur = torch.cumsum(w_ceil.squeeze(1), dim=1)  # [B, T_text]
+        cum_dur_shifted = torch.nn.functional.pad(cum_dur[:, :-1], (1, 0), value=0)
+        mel_ids_3d = torch.arange(max_mel, device=x.device).view(1, 1, max_mel)
+        attn = ((mel_ids_3d >= cum_dur_shifted.unsqueeze(2)) & (mel_ids_3d < cum_dur.unsqueeze(2))).float()
+        attn = attn * y_mask.squeeze(1).unsqueeze(1)  # [B, T_text, max_mel]
 
         # 4. Expand prior stats via alignment -----------------------------
-        # m_p / logs_p: [B, C, T_text], attn: [B, T_text, T_mel]
         m_p_expanded = torch.einsum("bct,btm->bcm", m_p, attn)
         logs_p_expanded = torch.einsum("bct,btm->bcm", logs_p, attn)
 
         # 5. Sample from prior using supplied noise -----------------------
-        # Trim or pad z_noise to match T_mel
         z_p = m_p_expanded + torch.exp(logs_p_expanded) * (
-            z_noise[:, :, :int(t_mel)] * noise_scale
+            z_noise * noise_scale
         )
 
         # 6. Inverse flow (triplet API, discard m/logs) --------------------
