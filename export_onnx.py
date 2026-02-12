@@ -294,8 +294,8 @@ class VitsOnnxWrapper(nn.Module):
             z_noise[:, :, :int(t_mel)] * noise_scale
         )
 
-        # 6. Inverse flow -------------------------------------------------
-        z = model.flow(z_p, y_mask, g=None, reverse=True)
+        # 6. Inverse flow (triplet API, discard m/logs) --------------------
+        z, _, _ = model.flow(z_p, m_p_expanded, logs_p_expanded, y_mask, g=None, reverse=True)
 
         # 7. HiFi-GAN decoder --------------------------------------------
         audio = model.dec(z * y_mask, g=None)  # [B, 1, T_audio]
