@@ -1,9 +1,9 @@
 """
 Normalizing Flows with Triplet Transform for VITS-2.
 Per paper Section 2.3 and daniilrobnikov reference:
-  - 4 affine coupling layers with full affine (shift+scale)
+  - 4 affine coupling layers with mean-only affine (shift)
   - Transforms (z, m, logs) triplet through the flow
-  - Transformer block applied BEFORE WaveNet in the last coupling layer
+  - Transformer block applied BEFORE WaveNet in each coupling layer
   - 4 WaveNet residual blocks per coupling layer
   - Hidden channels: 192, kernel: 5, dilation: 1
 ONNX-friendly: standard PyTorch ops.
@@ -14,28 +14,55 @@ import torch.nn as nn
 from src.models.posterior_encoder import WaveNetResBlock
 
 
-class FlowPreTransformer(nn.Module):
-    """Transformer block applied BEFORE WaveNet in the last flow layer.
-    Reuses EncoderLayer (relative-position attention + FFN)."""
-    def __init__(self, channels, n_heads=2, kernel_size=3, p_dropout=0.1):
+class FlowTransformer(nn.Module):
+    """Simple self-attention transformer block for flow layers.
+    Uses LayerNorm + linear Q/K/V/O projections with residual connection."""
+
+    def __init__(self, channels):
         super().__init__()
-        from src.models.text_encoder import EncoderLayer
-        self.layer = EncoderLayer(channels, channels * 4, n_heads, kernel_size, p_dropout)
+        self.norm = nn.LayerNorm(channels)
+        self.q_proj = nn.Linear(channels, channels)
+        self.k_proj = nn.Linear(channels, channels)
+        self.v_proj = nn.Linear(channels, channels)
+        self.out_proj = nn.Linear(channels, channels)
 
     def forward(self, x, x_mask):
-        return self.layer(x, x_mask)
+        # x: [B, C, T] -> transpose for attention
+        x_t = x.transpose(1, 2)  # [B, T, C]
+        x_norm = self.norm(x_t)
+        q = self.q_proj(x_norm)
+        k = self.k_proj(x_norm)
+        v = self.v_proj(x_norm)
+
+        # Scaled dot-product attention
+        scale = q.shape[-1] ** -0.5
+        attn = torch.matmul(q, k.transpose(-2, -1)) * scale
+
+        # Apply mask if provided
+        if x_mask is not None:
+            mask_bool = x_mask.squeeze(1).bool()  # [B, T]
+            attn_mask = mask_bool.unsqueeze(1) & mask_bool.unsqueeze(2)  # [B, T, T]
+            attn = attn.masked_fill(~attn_mask, float('-inf'))
+
+        attn = torch.softmax(attn, dim=-1)
+        out = torch.matmul(attn, v)
+        out = self.out_proj(out)
+
+        # Residual + transpose back
+        out = (x_t + out).transpose(1, 2)  # [B, C, T]
+        return out * x_mask if x_mask is not None else out
 
 
 class ResidualCouplingLayer(nn.Module):
     """
     Single affine coupling layer for normalizing flows.
-    Full affine coupling: outputs both shift and scale (mean_only=False).
+    Mean-only affine coupling (shift without scale).
     Transforms (x, m, logs) triplet through the flow.
     VITS2: optional transformer block applied BEFORE WaveNet.
     """
 
     def __init__(self, channels, hidden_channels, kernel_size, dilation_rate,
-                 n_layers, gin_channels=0, mean_only=False,
+                 n_layers, gin_channels=0, mean_only=True,
                  use_transformer_flow=False):
         super().__init__()
         self.channels = channels
@@ -50,7 +77,7 @@ class ResidualCouplingLayer(nn.Module):
 
         self.use_transformer_flow = use_transformer_flow
         if use_transformer_flow:
-            self.pre_transformer = FlowPreTransformer(hidden_channels)
+            self.transformer = FlowTransformer(hidden_channels)
 
         self.post = nn.Conv1d(hidden_channels, self.half_channels * (2 - mean_only), 1)
         self.post.weight.data.zero_()
@@ -74,7 +101,7 @@ class ResidualCouplingLayer(nn.Module):
 
         h = self.pre(x0) * x_mask
         if self.use_transformer_flow:
-            h = self.pre_transformer(h, x_mask)
+            h = self.transformer(h, x_mask)
         h = self.enc(h, x_mask, g=g)
         stats = self.post(h) * x_mask
 
@@ -106,7 +133,7 @@ class ResidualCouplingBlock(nn.Module):
     """
     Stack of residual coupling layers forming the normalizing flow.
     Per paper: 4 coupling layers, channel flip between layers.
-    Transformer only on the last coupling layer.
+    Transformer applied on all coupling layers when use_transformer_flow=True.
     Forward: training (posterior z -> transformed z)
     Inverse: inference (prior z -> latent z for decoder)
     """
@@ -119,8 +146,8 @@ class ResidualCouplingBlock(nn.Module):
             self.flows.append(
                 ResidualCouplingLayer(
                     channels, hidden_channels, kernel_size, dilation_rate,
-                    n_layers, gin_channels=gin_channels, mean_only=False,
-                    use_transformer_flow=(use_transformer_flow and i == n_flows - 1)
+                    n_layers, gin_channels=gin_channels, mean_only=True,
+                    use_transformer_flow=use_transformer_flow,
                 )
             )
             self.flows.append(Flip())
